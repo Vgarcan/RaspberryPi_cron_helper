@@ -1,0 +1,567 @@
+#!/bin/bash
+
+# ====================================================
+# XEMI CRON HELPER - v1.3
+# A visual assistant for managing cron jobs in Linux
+# ====================================================
+
+# --- COLORS ---
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+CYAN="\e[36m"
+MAGENTA="\e[35m"
+RESET="\e[0m"
+
+# --- SHOW TITLE ---
+show_title() {
+  clear
+  sleep 0.65
+  echo -e "${CYAN}"
+  echo "╔════════════════════════════════════════════╗"
+  echo "║           XEMI CRON HELPER - v1.3          ║"
+  echo "╚════════════════════════════════════════════╝"
+  echo -e "${RESET}"
+}
+
+# --- MAIN MENU ---
+main_menu() {
+  while true; do
+    show_title
+    echo -e "${YELLOW}What would you like to do?${RESET}"
+    echo "1) Create a new cron job (guided)"
+    echo "2) List current cron jobs"
+    echo "3) Edit an existing cron job"
+    echo "4) Delete a cron job"
+    echo "5) Exit"
+    echo
+    read -p "Select an option: " option
+    case $option in
+      1) create_cronjob ;;
+      2) list_cronjobs ;;
+      3) edit_cronjob ;;
+      4) delete_cronjob ;;
+      5) exit ;;
+      *) echo -e "${RED}Invalid option. Please try again.${RESET}"; sleep 2 ;;
+    esac
+  done
+}
+
+# --- CREATE CRON JOB (PRO GUIDED VERSION - USER CONTEXT) ---
+create_cronjob() {
+  REAL_USER=$(logname)
+  USER_HOME=$(eval echo "~$REAL_USER")
+
+  while true; do
+    show_title
+    echo -e "${CYAN}Let's create a new scheduled task (cron job)!${RESET}"
+    echo
+    echo -e "${YELLOW}[GUIDE]${RESET} A cron job lets you run commands or scripts automatically at specific times."
+    echo -e "${YELLOW}[Format]${RESET} Cron uses this structure:"
+    echo -e "        ${CYAN}MIN HOUR DAY MONTH WEEKDAY${RESET}  → command to run"
+    echo -e "Example: ${CYAN}0 5 * * 1${RESET} will run every Monday at 5:00 AM."
+    echo
+    echo -e "${MAGENTA}[B] Back | [C] Cancel at any time${RESET}"
+    echo
+    echo -e "${YELLOW}When would you like the task to run?${RESET}"
+    echo "1) Every minute"
+    echo "2) Every X minutes"
+    echo "3) Every X hours"
+    echo "4) At a specific time every day"
+    echo "5) At a specific time on specific weekdays"
+    echo "6) Custom schedule (for advanced users)"
+    echo
+
+    read -p "Select an option: " freq
+    case $freq in
+      1) schedule="* * * * *"; break ;;
+      2)
+        echo -e "${YELLOW}Enter how often in minutes (e.g. 5):${RESET}"
+        read -p "Minutes: " mins
+        [[ "$mins" =~ ^[Bb]$ ]] && continue
+        [[ "$mins" =~ ^[Cc]$ ]] && return
+        schedule="*/$mins * * * *"; break ;;
+      3)
+        echo -e "${YELLOW}Enter how often in hours (e.g. 2):${RESET}"
+        read -p "Hours: " hours
+        [[ "$hours" =~ ^[Bb]$ ]] && continue
+        [[ "$hours" =~ ^[Cc]$ ]] && return
+        schedule="0 */$hours * * *"; break ;;
+      4)
+        read -p "Hour (0-23): " hour
+        [[ "$hour" =~ ^[Bb]$ ]] && continue
+        [[ "$hour" =~ ^[Cc]$ ]] && return
+        read -p "Minute (0-59): " min
+        [[ "$min" =~ ^[Bb]$ ]] && continue
+        [[ "$min" =~ ^[Cc]$ ]] && return
+        schedule="$min $hour * * *"; break ;;
+      5)
+        read -p "Hour (0-23): " hour
+        [[ "$hour" =~ ^[Bb]$ ]] && continue
+        [[ "$hour" =~ ^[Cc]$ ]] && return
+        read -p "Minute (0-59): " min
+        [[ "$min" =~ ^[Bb]$ ]] && continue
+        [[ "$min" =~ ^[Cc]$ ]] && return
+        echo
+        echo -e "${YELLOW}[Guide]${RESET} Days of the week:"
+        echo -e "  ${CYAN}0${RESET}=Sun ${CYAN}1${RESET}=Mon ${CYAN}2${RESET}=Tue ${CYAN}3${RESET}=Wed ${CYAN}4${RESET}=Thu ${CYAN}5${RESET}=Fri ${CYAN}6${RESET}=Sat"
+        echo -e "  Example: ${CYAN}1,3,5${RESET} = Monday, Wednesday and Friday"
+        echo -e "${MAGENTA}[B] Back | [C] Cancel${RESET}"
+        read -p "Enter weekdays: " days
+        [[ "$days" =~ ^[Bb]$ ]] && continue
+        [[ "$days" =~ ^[Cc]$ ]] && return
+        schedule="$min $hour * * $days"; break ;;
+      6)
+        echo
+        echo -e "${YELLOW}[Advanced Mode]${RESET} Enter the full cron expression manually:"
+        echo -e "${CYAN}Format:${RESET} MIN HOUR DAY MONTH WEEKDAY"
+        echo
+        echo -e "${YELLOW}🧪 Examples:${RESET}"
+        echo -e "  ${CYAN}0 6 * * 1${RESET}       → Every Monday at 6:00 AM"
+        echo -e "  ${CYAN}30 23 * * *${RESET}     → Every day at 11:30 PM"
+        echo -e "  ${CYAN}*/15 * * * *${RESET}    → Every 15 minutes"
+        echo
+        echo -e "${MAGENTA}[B] Back | [C] Cancel${RESET}"
+        read -p "Enter your custom cron expression: " schedule
+        [[ "$schedule" =~ ^[Bb]$ ]] && continue
+        [[ "$schedule" =~ ^[Cc]$ ]] && return
+        break ;;
+      [Bb]) return ;;
+      [Cc]) return ;;
+      *) echo -e "${RED}Invalid option. Please choose 1-6.${RESET}"; sleep 2 ;;
+    esac
+  done
+
+  # --- COMMAND INPUT ---
+  while true; do
+    echo
+    echo -e "${GREEN}Schedule selected:${RESET} $schedule"
+    echo -e "${YELLOW}Now enter the command you want to run at that time.${RESET}"
+    echo -e "${MAGENTA}[B] Back to schedule | [C] Cancel${RESET}"
+    read -p "Command to run: " command
+    [[ "$command" =~ ^[Bb]$ ]] && create_cronjob && return
+    [[ "$command" =~ ^[Cc]$ ]] && return
+    [[ -z "$command" ]] && echo -e "${RED}Command cannot be empty.${RESET}" && continue
+    break
+  done
+
+  # --- META: NAME & COMMENT ---
+  echo
+  read -p "Do you want to name this cron job? (Y/N): " use_name
+  if [[ "$use_name" =~ ^[Yy]$ ]]; then
+    read -p "Enter a name (ID): " job_name
+    cron_name="# [CronJob-ID]: $job_name"
+  fi
+
+  read -p "Do you want to add a comment or description? (Y/N): " use_comment
+  if [[ "$use_comment" =~ ^[Yy]$ ]]; then
+    read -p "Comment: " cron_comment
+    cron_comment="# $cron_comment"
+  fi
+
+  # --- OPTIONAL LOGGING ---
+  echo
+  read -p "Do you want to save output to a log file? (Y/N): " use_log
+  if [[ "$use_log" =~ ^[Yy]$ ]]; then
+    log_dir="$USER_HOME/logs/cronjobs"
+    mkdir -p "$log_dir"
+    log_file_name="${job_name:-$(basename "$command" | awk '{print $1}')}.log"
+    log_path="$log_dir/$log_file_name"
+    echo
+    echo -e "${YELLOW}Default log path suggested:${RESET} $log_path"
+    read -p "Press Enter to accept or type a custom path: " custom_log
+    [[ -n "$custom_log" ]] && log_path="$custom_log"
+    full_command="$command >> \"$log_path\" 2>&1"
+  else
+    full_command="$command"
+  fi
+
+  # --- FINAL CONFIRMATION ---
+  echo
+  echo -e "${YELLOW}This is your final cron job:${RESET}"
+  [[ -n "$cron_name" ]] && echo -e "  ${CYAN}$cron_name${RESET}"
+  [[ -n "$cron_comment" ]] && echo -e "  ${CYAN}$cron_comment${RESET}"
+  echo -e "  ${YELLOW}Schedule:${RESET} $schedule"
+  echo -e "  ${MAGENTA}Command:${RESET} $command"
+  [[ -n "$log_path" ]] && echo -e "  ${GREEN}Log file:${RESET} $log_path"
+  echo
+
+  read -p "Save this cron job? (Y/N): " confirm
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    {
+      crontab -u "$REAL_USER" -l 2>/dev/null
+      [[ -n "$cron_name" ]] && echo "$cron_name"
+      [[ -n "$cron_comment" ]] && echo "$cron_comment"
+      echo "$schedule $full_command"
+    } | crontab -u "$REAL_USER" -
+    echo -e "${GREEN}✅ Cron job saved successfully for user $REAL_USER.${RESET}"
+  else
+    echo -e "${CYAN}❌ Cron job was not saved.${RESET}"
+  fi
+  read -p "Press [Enter] to return to the main menu..." pause
+}
+
+
+
+# --- LIST CRON JOBS (WITH NAMES, COMMENTS AND LOG VIEW) ---
+list_cronjobs() {
+  show_title
+  echo -e "${CYAN}Current cron jobs:${RESET}"
+
+  REAL_USER=$(logname)
+
+  crontab -u "$REAL_USER" -l 2>/dev/null > /tmp/cron_raw
+  grep -v '^$' /tmp/cron_raw > /tmp/cron_cleaned
+
+  if [[ ! -s /tmp/cron_cleaned ]]; then
+    echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
+    echo
+    read -p "Press [Enter] to return..." pause
+    return
+  fi
+
+  declare -A job_lines job_logs job_meta job_names
+  current_block=""
+  job_index=1
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^#\ \[(XEMI-ID|CronJob-ID)\]:\ (.+) ]]; then
+      current_block="$line"
+      job_names[$job_index]="${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^# ]]; then
+      current_block+=$'\n'"$line"
+    elif [[ "$line" =~ ^([0-9\*/,-]+\ ){4,}[^\ ]+ ]]; then
+      schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
+      command_part=$(echo "$line" | cut -d' ' -f6-)
+      log_path=$(echo "$command_part" | grep -oP '>>\s*\K[^ ]+' | tr -d '"')
+      job_lines[$job_index]="$line"
+      job_logs[$job_index]="$log_path"
+      job_meta[$job_index]="$current_block"
+      current_block=""
+      ((job_index++))
+    fi
+  done < /tmp/cron_cleaned
+
+  echo
+
+  for index in "${!job_lines[@]}"; do
+    meta="${job_meta[$index]}"
+    [[ -n "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}\n  ${YELLOW}${meta//\\n/\\n  }"
+    [[ -z "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}"
+
+    schedule_part=$(echo "${job_lines[$index]}" | awk '{print $1, $2, $3, $4, $5}')
+    command_part=$(echo "${job_lines[$index]}" | cut -d' ' -f6-)
+
+    echo -e "  ${YELLOW}Schedule:${RESET} $schedule_part"
+    echo -e "  ${MAGENTA}Command: ${RESET}$command_part"
+    if [[ -n "${job_logs[$index]}" ]]; then
+      echo -e "  ${GREEN}Log file:${RESET} ${job_logs[$index]}"
+    else
+      echo -e "  ${RED}Log file:${RESET} No log file detected"
+    fi
+    echo -e "${CYAN}--------------------------------------------------${RESET}"
+  done
+
+  echo
+  read -p "Would you like to view the log of any job? (Y/N): " see_log
+  if [[ "$see_log" =~ ^[Yy]$ ]]; then
+    read -p "Enter the job number or CronJob-ID: " input_id
+    selected_log=""
+
+    # If input is a number
+    if [[ "$input_id" =~ ^[0-9]+$ ]]; then
+      selected_log="${job_logs[$input_id]}"
+    else
+      for i in "${!job_names[@]}"; do
+        if [[ "${job_names[$i],,}" == "${input_id,,}" ]]; then
+          selected_log="${job_logs[$i]}"
+          break
+        fi
+      done
+    fi
+
+    if [[ -n "$selected_log" ]]; then
+      if [[ -f "$selected_log" ]]; then
+        echo -e "${CYAN}Opening log file:${RESET} $selected_log"
+        read -p "Press [Enter] to view it (press Q to quit viewer)..." pause
+        less "$selected_log"
+      else
+        echo -e "${RED}Log file not found:${RESET} $selected_log"
+      fi
+    else
+      echo -e "${RED}No matching job or log file found for that input.${RESET}"
+    fi
+    read -p "Press [Enter] to return..." pause
+  else
+    echo
+    read -p "Press [Enter] to return..." pause
+  fi
+}
+
+
+# --- EDIT CRON JOB (FULLY INTERACTIVE WITH SCHEDULE ASSISTANT) ---
+# --- EDIT CRON JOB (FULLY INTERACTIVE WITH SCHEDULE ASSISTANT) ---
+edit_cronjob() {
+  show_title
+  echo -e "${CYAN}Edit an existing cron job${RESET}"
+
+  REAL_USER=$(logname)
+  crontab -u "$REAL_USER" -l 2>/dev/null > /tmp/cron_raw
+  grep -v '^$' /tmp/cron_raw > /tmp/cron_cleaned
+
+  if [[ ! -s /tmp/cron_cleaned ]]; then
+    echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
+    read -p "Press [Enter] to return..." pause
+    return
+  fi
+
+  declare -A job_lines job_logs job_meta job_names job_raw_lines
+  current_block=""
+  job_index=1
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^#\ \[(XEMI-ID|CronJob-ID)\]:\ (.+) ]]; then
+      current_block="$line"
+      job_names[$job_index]="${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^# ]]; then
+      current_block+=$'\n'$line
+    elif [[ "$line" =~ ^([0-9\*/,-]+\ +){4}[0-9\*/,-]+ ]]; then
+      schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
+      command_part=$(echo "$line" | awk '{for (i=6; i<=NF; i++) printf "%s ", $i; print ""}')
+      log_path=$(echo "$command_part" | grep -oP '>>\s*\K[^ ]+' | tr -d '"')
+      job_lines[$job_index]="$line"
+      job_logs[$job_index]="$log_path"
+      job_meta[$job_index]="$current_block"
+      job_raw_lines[$job_index]="$current_block
+$line"
+      current_block=""
+      ((job_index++))
+    fi
+  done < /tmp/cron_cleaned
+
+  echo
+  for i in "${!job_lines[@]}"; do
+    echo -e "${CYAN}Job #$i${RESET}"
+    [[ -n "${job_meta[$i]}" ]] && echo -e "  ${YELLOW}${job_meta[$i]//\n/\n  }"
+    schedule_part=$(echo "${job_lines[$i]}" | awk '{print $1, $2, $3, $4, $5}')
+    command_part=$(echo "${job_lines[$i]}" | awk '{for (j=6; j<=NF; j++) printf "%s ", $j; print ""}')
+    echo -e "  ${YELLOW}Schedule:${RESET} $schedule_part"
+    echo -e "  ${MAGENTA}Command:${RESET} $command_part"
+    [[ -n "${job_logs[$i]}" ]] && echo -e "  ${GREEN}Log file:${RESET} ${job_logs[$i]}"
+    echo -e "${CYAN}--------------------------------------------------${RESET}"
+  done
+
+  echo
+  echo -e "${MAGENTA}[C] Cancel${RESET}"
+  read -p "Enter the job number or CronJob-ID to edit: " input
+  [[ "$input" =~ ^[Cc]$ ]] && return
+
+  selected_index=""
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    selected_index="$input"
+  else
+    for i in "${!job_names[@]}"; do
+      if [[ "${job_names[$i],,}" == "${input,,}" ]]; then
+        selected_index="$i"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$selected_index" ]] || [[ -z "${job_lines[$selected_index]}" ]]; then
+    echo -e "${RED}No matching cron job found.${RESET}"
+    read -p "Press [Enter] to return..." pause
+    return
+  fi
+
+  old_line="${job_lines[$selected_index]}"
+  schedule_part=$(echo "$old_line" | awk '{print $1, $2, $3, $4, $5}')
+  command_part=$(echo "$old_line" | awk '{for (i=6; i<=NF; i++) printf "%s ", $i; print ""}' | sed 's/>>.*//')
+  log_path=$(echo "$old_line" | grep -oP '>>\s*\K[^ ]+' | tr -d '"')
+  job_name="${job_names[$selected_index]}"
+  comment=$(echo "${job_meta[$selected_index]}" | grep -v '\[.*\]' | sed 's/^# *//')
+
+  while true; do
+    echo
+    echo -e "${CYAN}Current job details:${RESET}"
+    [[ -n "$job_name" ]] && echo -e "  ${YELLOW}Name:${RESET} $job_name"
+    [[ -n "$comment" ]] && echo -e "  ${YELLOW}Comment:${RESET} $comment"
+    echo -e "  ${YELLOW}Schedule:${RESET} $schedule_part"
+    echo -e "  ${MAGENTA}Command:${RESET} $command_part"
+    [[ -n "$log_path" ]] && echo -e "  ${GREEN}Log file:${RESET} $log_path"
+
+    echo -e "${YELLOW}What do you want to edit?${RESET}"
+    echo "1) Schedule"
+    echo "2) Command"
+    echo "3) Log path"
+    echo "4) Name (CronJob-ID)"
+    echo "5) Comment"
+    echo "6) Finish editing"
+    echo
+    read -p "Select an option: " choice
+
+    case "$choice" in
+      1)
+        while true; do
+          echo
+          echo -e "${CYAN}Choose a new schedule:${RESET}"
+          echo "1) Every minute"
+          echo "2) Every X minutes"
+          echo "3) Every X hours"
+          echo "4) At a specific time daily"
+          echo "5) At a specific time on selected weekdays"
+          echo "6) Enter manually"
+          echo "[B] Back | [C] Cancel"
+          echo
+          read -p "Option: " sched_opt
+          case "$sched_opt" in
+            1) schedule_part="* * * * *"; break ;;
+            2) read -p "Minutes: " mins; schedule_part="*/$mins * * * *"; break ;;
+            3) read -p "Hours: " hrs; schedule_part="0 */$hrs * * *"; break ;;
+            4)
+              read -p "Hour (0-23): " h; read -p "Minute (0-59): " m
+              schedule_part="$m $h * * *"; break ;;
+            5)
+              read -p "Hour (0-23): " h; read -p "Minute (0-59): " m
+              echo "  0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat"
+              read -p "Weekdays (comma-separated): " d
+              schedule_part="$m $h * * $d"; break ;;
+            6)
+              read -p "Manual cron expression: " schedule_part; break ;;
+            [Bb]) break ;;
+            [Cc]) return ;;
+            *) echo -e "${RED}Invalid option.${RESET}" ;;
+          esac
+        done
+        ;;
+      2) read -p "New command: " command_part ;;
+      3) read -p "New log file path (leave empty to remove): " log_path ;;
+      4) read -p "New name: " job_name ;;
+      5) read -p "New comment: " comment ;;
+      6) break ;;
+      *) echo -e "${RED}Invalid option.${RESET}" ;;
+    esac
+  done
+
+  new_block=""
+  [[ -n "$job_name" ]] && new_block="# [CronJob-ID]: $job_name"
+  [[ -n "$comment" ]] && new_block+=$'\n'# "$comment"
+  new_command="$command_part"
+  [[ -n "$log_path" ]] && new_command+=" >> \"$log_path\" 2>&1"
+  new_line="$schedule_part $new_command"
+
+  grep -v -F "${job_raw_lines[$selected_index]}" /tmp/cron_cleaned > /tmp/cron_temp
+  {
+    cat /tmp/cron_temp
+    [[ -n "$new_block" ]] && echo "$new_block"
+    echo "$new_line"
+  } > /tmp/cron_updated
+
+  crontab -u "$REAL_USER" /tmp/cron_updated
+  echo
+  echo -e "${GREEN}Cron job updated successfully.${RESET}"
+  read -p "Press [Enter] to return..." pause
+}
+
+
+
+
+# --- DELETE CRON JOB (VISUAL + CONFIRMATION) ---
+delete_cronjob() {
+  show_title
+  echo -e "${CYAN}Delete an existing cron job${RESET}"
+
+  REAL_USER=$(logname)
+  crontab -u "$REAL_USER" -l 2>/dev/null > /tmp/cron_raw
+  grep -v '^$' /tmp/cron_raw > /tmp/cron_cleaned
+
+  if [[ ! -s /tmp/cron_cleaned ]]; then
+    echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
+    echo
+    read -p "Press [Enter] to return..." pause
+    return
+  fi
+
+  declare -A job_lines job_blocks job_logs job_meta job_names
+  current_block=""
+  job_index=1
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^#\ \[(XEMI-ID|CronJob-ID)\]:\ (.+) ]]; then
+      current_block="$line"
+      job_names[$job_index]="${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^# ]]; then
+      current_block+=$'\n'$line
+    elif [[ "$line" =~ ^([0-9\*/,-]+\ +){4}[0-9\*/,-]+ ]]; then
+      schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
+      command_part=$(echo "$line" | cut -d' ' -f6-)
+      log_path=$(echo "$command_part" | grep -oP '>>\s*"\K[^"]+')
+
+      job_lines[$job_index]="$line"
+      job_blocks[$job_index]="$current_block"
+      job_logs[$job_index]="$log_path"
+      job_meta[$job_index]="$current_block"
+      current_block=""
+      ((job_index++))
+    fi
+  done < /tmp/cron_cleaned
+
+  echo
+  for index in "${!job_lines[@]}"; do
+    echo -e "${CYAN}Job #$index${RESET}"
+    [[ -n "${job_blocks[$index]}" ]] && echo -e "  ${YELLOW}${job_blocks[$index]//\n/\n  }"
+    echo -e "  ${YELLOW}Schedule:${RESET} $(echo "${job_lines[$index]}" | awk '{print $1, $2, $3, $4, $5}')"
+    echo -e "  ${MAGENTA}Command: ${RESET}$(echo "${job_lines[$index]}" | cut -d' ' -f6-)"
+    if [[ -n "${job_logs[$index]}" ]]; then
+      echo -e "  ${GREEN}Log file:${RESET} ${job_logs[$index]}"
+    else
+      echo -e "  ${RED}Log file:${RESET} No log detected"
+    fi
+    echo -e "${CYAN}--------------------------------------------------${RESET}"
+  done
+
+  echo
+  echo -e "${MAGENTA}[C] Cancel${RESET}"
+  read -p "Enter the job number to delete: " choice
+  [[ "$choice" =~ ^[Cc]$ ]] && return
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ -z "${job_lines[$choice]}" ]]; then
+    echo -e "${RED}Invalid selection.${RESET}"
+    read -p "Press [Enter] to return..." pause
+    return
+  fi
+
+  echo
+  echo -e "${YELLOW}You selected to delete:${RESET}"
+  [[ -n "${job_blocks[$choice]}" ]] && echo -e "${job_blocks[$choice]}"
+  echo -e "${CYAN}${job_lines[$choice]}${RESET}"
+  echo
+  read -p "Are you sure you want to delete this cron job? (Y/N): " confirm1
+  if [[ "$confirm1" =~ ^[Yy]$ ]]; then
+    read -p "Please confirm again. Delete this cron job? (Y/N): " confirm2
+    if [[ "$confirm2" =~ ^[Yy]$ ]]; then
+      first_line=$(echo "${job_blocks[$choice]}" | head -n 1)
+      last_line="${job_lines[$choice]}"
+
+      awk -v start="$first_line" -v end="$last_line" '
+        BEGIN { skip=0 }
+        $0 == start { skip=1; next }
+        skip && $0 == end { skip=0; next }
+        !skip { print }
+      ' /tmp/cron_cleaned > /tmp/cron_updated
+
+      crontab -u "$REAL_USER" /tmp/cron_updated
+      echo
+      echo -e "${GREEN}Cron job deleted successfully.${RESET}"
+    else
+      echo -e "${CYAN}Deletion cancelled.${RESET}"
+    fi
+  else
+    echo -e "${CYAN}Deletion cancelled.${RESET}"
+  fi
+
+  read -p "Press [Enter] to return..." pause
+}
+
+
+# --- START SCRIPT ---
+main_menu
