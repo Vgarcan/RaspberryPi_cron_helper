@@ -13,6 +13,92 @@ CYAN="\e[36m"
 MAGENTA="\e[35m"
 RESET="\e[0m"
 
+LOG_OWNER="${SUDO_USER:-${USER:-$(id -un)}}"
+LOG_HOME="$(getent passwd "$LOG_OWNER" | awk -F: '{print $6}')"
+[[ -z "$LOG_HOME" ]] && LOG_HOME="${HOME}"
+LOG_DIR="${LOG_HOME}/.xemi_logs"
+LOG_FILE="${LOG_DIR}/cron_helper.log"
+
+log_action() {
+  mkdir -p "$LOG_DIR"
+  printf '[%s] user=%s host=%s %s\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" \
+    "${SUDO_USER:-${USER:-$(id -un)}}" \
+    "${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}" \
+    "$1" >>"$LOG_FILE"
+}
+
+resolve_cron_user() {
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    printf '%s\n' "$SUDO_USER"
+    return 0
+  fi
+
+  if command -v logname >/dev/null 2>&1; then
+    local user
+    user="$(logname 2>/dev/null || true)"
+    if [[ -n "$user" && "$user" != "root" ]]; then
+      printf '%s\n' "$user"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "${USER:-$(id -un)}"
+}
+
+resolve_user_home() {
+  local user="$1"
+  getent passwd "$user" | awk -F: '{print $6}'
+}
+
+read_crontab_for_user() {
+  local user="$1"
+  local outfile="$2"
+
+  if [[ "$user" == "${USER:-$(id -un)}" ]]; then
+    crontab -l 2>/dev/null >"$outfile"
+  else
+    crontab -u "$user" -l 2>/dev/null >"$outfile"
+  fi
+}
+
+write_crontab_for_user() {
+  local user="$1"
+  local infile="$2"
+
+  if [[ "$user" == "${USER:-$(id -un)}" ]]; then
+    crontab "$infile"
+  else
+    crontab -u "$user" "$infile"
+  fi
+}
+
+make_temp_file() {
+  mktemp "${TMPDIR:-/tmp}/xemi-cron.XXXXXX"
+}
+
+extract_log_path() {
+  local text="$1"
+
+  if [[ "$text" =~ \>\>[[:space:]]*\"([^\"]+)\" ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$text" =~ \>\>[[:space:]]*([^[:space:]]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
+is_generated_block() {
+  local block="$1"
+  [[ "$block" =~ \#\ \[(XEMI-ID|CronJob-ID)\]: ]]
+}
+
+job_exists_exactly() {
+  local cron_file="$1"
+  local candidate="$2"
+
+  grep -Fxq -- "$candidate" "$cron_file"
+}
+
 # --- SHOW TITLE ---
 show_title() {
   clear
@@ -49,8 +135,15 @@ main_menu() {
 
 # --- CREATE CRON JOB (PRO GUIDED VERSION - USER CONTEXT) ---
 create_cronjob() {
-  REAL_USER=$(logname)
-  USER_HOME=$(eval echo "~$REAL_USER")
+  local REAL_USER USER_HOME cron_raw cron_updated
+  REAL_USER="$(resolve_cron_user)"
+  USER_HOME="$(resolve_user_home "$REAL_USER")"
+  if [[ -z "$USER_HOME" ]]; then
+    USER_HOME="${HOME}"
+  fi
+  cron_raw="$(make_temp_file)"
+  cron_updated="$(make_temp_file)"
+  trap 'rm -f "$cron_raw" "$cron_updated"' RETURN
 
   while true; do
     show_title
@@ -188,15 +281,26 @@ create_cronjob() {
 
   read -p "Save this cron job? (Y/N): " confirm
   if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    read_crontab_for_user "$REAL_USER" "$cron_raw"
+    if job_exists_exactly "$cron_raw" "$schedule $full_command"; then
+      echo -e "${YELLOW}A cron job with the same schedule and command already exists.${RESET}"
+      echo -e "${CYAN}Nothing was saved to avoid a duplicate.${RESET}"
+      log_action "creation skipped duplicate for $REAL_USER schedule='$schedule' command='$command' log='${log_path:-none}'"
+      read -p "Press [Enter] to return to the main menu..." pause
+      return
+    fi
     {
-      crontab -u "$REAL_USER" -l 2>/dev/null
+      cat "$cron_raw"
       [[ -n "$cron_name" ]] && echo "$cron_name"
       [[ -n "$cron_comment" ]] && echo "$cron_comment"
       echo "$schedule $full_command"
-    } | crontab -u "$REAL_USER" -
+    } >"$cron_updated"
+    write_crontab_for_user "$REAL_USER" "$cron_updated"
     echo -e "${GREEN}✅ Cron job saved successfully for user $REAL_USER.${RESET}"
+    log_action "created cron job for $REAL_USER schedule='$schedule' command='$command' log='${log_path:-none}'"
   else
     echo -e "${CYAN}❌ Cron job was not saved.${RESET}"
+    log_action "creation cancelled for $REAL_USER schedule='$schedule' command='$command'"
   fi
   read -p "Press [Enter] to return to the main menu..." pause
 }
@@ -208,19 +312,24 @@ list_cronjobs() {
   show_title
   echo -e "${CYAN}Current cron jobs:${RESET}"
 
-  REAL_USER=$(logname)
+  local REAL_USER cron_raw cron_cleaned
+  REAL_USER="$(resolve_cron_user)"
 
-  crontab -u "$REAL_USER" -l 2>/dev/null > /tmp/cron_raw
-  grep -v '^$' /tmp/cron_raw > /tmp/cron_cleaned
+  cron_raw="$(make_temp_file)"
+  cron_cleaned="$(make_temp_file)"
+  trap 'rm -f "$cron_raw" "$cron_cleaned"' RETURN
 
-  if [[ ! -s /tmp/cron_cleaned ]]; then
+  read_crontab_for_user "$REAL_USER" "$cron_raw"
+  grep -v '^$' "$cron_raw" >"$cron_cleaned"
+
+  if [[ ! -s "$cron_cleaned" ]]; then
     echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
     echo
     read -p "Press [Enter] to return..." pause
     return
   fi
 
-  declare -A job_lines job_logs job_meta job_names
+  declare -A job_lines job_logs job_meta job_names job_source
   current_block=""
   job_index=1
 
@@ -233,21 +342,37 @@ list_cronjobs() {
     elif [[ "$line" =~ ^([0-9\*/,-]+\ ){4,}[^\ ]+ ]]; then
       schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
       command_part=$(echo "$line" | cut -d' ' -f6-)
-      log_path=$(echo "$command_part" | grep -oP '>>\s*\K[^ ]+' | tr -d '"')
+      log_path=$(extract_log_path "$command_part")
       job_lines[$job_index]="$line"
       job_logs[$job_index]="$log_path"
       job_meta[$job_index]="$current_block"
+      if is_generated_block "$current_block"; then
+        job_source[$job_index]="generated"
+      else
+        job_source[$job_index]="manual"
+      fi
       current_block=""
       ((job_index++))
     fi
-  done < /tmp/cron_cleaned
+  done < "$cron_cleaned"
 
   echo
-
-  for index in "${!job_lines[@]}"; do
+  local generated_count=0 manual_count=0
+  for index in $(printf '%s\n' "${!job_lines[@]}" | sort -n); do
+    [[ "${job_source[$index]}" == "generated" ]] && ((generated_count++))
+    [[ "${job_source[$index]}" == "manual" ]] && ((manual_count++))
+  done
+  echo -e "${YELLOW}Summary:${RESET} ${GREEN}${generated_count} generated${RESET}, ${MAGENTA}${manual_count} manual${RESET}"
+  echo
+  echo -e "${CYAN}Generated jobs from this helper:${RESET}"
+  local found_generated=0
+  for index in $(printf '%s\n' "${!job_lines[@]}" | sort -n); do
+    [[ "${job_source[$index]}" != "generated" ]] && continue
+    found_generated=1
     meta="${job_meta[$index]}"
     [[ -n "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}\n  ${YELLOW}${meta//\\n/\\n  }"
     [[ -z "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}"
+    echo -e "  ${MAGENTA}Type:${RESET} generated"
 
     schedule_part=$(echo "${job_lines[$index]}" | awk '{print $1, $2, $3, $4, $5}')
     command_part=$(echo "${job_lines[$index]}" | cut -d' ' -f6-)
@@ -261,6 +386,32 @@ list_cronjobs() {
     fi
     echo -e "${CYAN}--------------------------------------------------${RESET}"
   done
+  [[ "$found_generated" -eq 0 ]] && echo -e "${YELLOW}No generated jobs found.${RESET}"
+
+  echo
+  echo -e "${CYAN}Manual or external cron jobs:${RESET}"
+  local found_manual=0
+  for index in $(printf '%s\n' "${!job_lines[@]}" | sort -n); do
+    [[ "${job_source[$index]}" != "manual" ]] && continue
+    found_manual=1
+    meta="${job_meta[$index]}"
+    [[ -n "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}\n  ${YELLOW}${meta//\\n/\\n  }"
+    [[ -z "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}"
+    echo -e "  ${MAGENTA}Type:${RESET} manual"
+
+    schedule_part=$(echo "${job_lines[$index]}" | awk '{print $1, $2, $3, $4, $5}')
+    command_part=$(echo "${job_lines[$index]}" | cut -d' ' -f6-)
+
+    echo -e "  ${YELLOW}Schedule:${RESET} $schedule_part"
+    echo -e "  ${MAGENTA}Command: ${RESET}$command_part"
+    if [[ -n "${job_logs[$index]}" ]]; then
+      echo -e "  ${GREEN}Log file:${RESET} ${job_logs[$index]}"
+    else
+      echo -e "  ${RED}Log file:${RESET} No log file detected"
+    fi
+    echo -e "${CYAN}--------------------------------------------------${RESET}"
+  done
+  [[ "$found_manual" -eq 0 ]] && echo -e "${YELLOW}No manual jobs found.${RESET}"
 
   echo
   read -p "Would you like to view the log of any job? (Y/N): " see_log
@@ -284,18 +435,24 @@ list_cronjobs() {
       if [[ -f "$selected_log" ]]; then
         echo -e "${CYAN}Opening log file:${RESET} $selected_log"
         read -p "Press [Enter] to view it (press Q to quit viewer)..." pause
-        less "$selected_log"
+        if command -v less >/dev/null 2>&1; then
+          less "$selected_log"
+        else
+          cat "$selected_log"
+        fi
       else
         echo -e "${RED}Log file not found:${RESET} $selected_log"
       fi
-    else
-      echo -e "${RED}No matching job or log file found for that input.${RESET}"
-    fi
+      else
+        echo -e "${RED}No matching job or log file found for that input.${RESET}"
+      fi
     read -p "Press [Enter] to return..." pause
   else
     echo
     read -p "Press [Enter] to return..." pause
   fi
+
+  log_action "listed cron jobs for $REAL_USER"
 }
 
 
@@ -305,17 +462,23 @@ edit_cronjob() {
   show_title
   echo -e "${CYAN}Edit an existing cron job${RESET}"
 
-  REAL_USER=$(logname)
-  crontab -u "$REAL_USER" -l 2>/dev/null > /tmp/cron_raw
-  grep -v '^$' /tmp/cron_raw > /tmp/cron_cleaned
+  local REAL_USER cron_raw cron_cleaned cron_updated
+  REAL_USER="$(resolve_cron_user)"
+  cron_raw="$(make_temp_file)"
+  cron_cleaned="$(make_temp_file)"
+  cron_updated="$(make_temp_file)"
+  trap 'rm -f "$cron_raw" "$cron_cleaned" "$cron_updated"' RETURN
 
-  if [[ ! -s /tmp/cron_cleaned ]]; then
+  read_crontab_for_user "$REAL_USER" "$cron_raw"
+  grep -v '^$' "$cron_raw" >"$cron_cleaned"
+
+  if [[ ! -s "$cron_cleaned" ]]; then
     echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
     read -p "Press [Enter] to return..." pause
     return
   fi
 
-  declare -A job_lines job_logs job_meta job_names job_raw_lines
+  declare -A job_lines job_logs job_meta job_names job_blocks
   current_block=""
   job_index=1
 
@@ -328,19 +491,18 @@ edit_cronjob() {
     elif [[ "$line" =~ ^([0-9\*/,-]+\ +){4}[0-9\*/,-]+ ]]; then
       schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
       command_part=$(echo "$line" | awk '{for (i=6; i<=NF; i++) printf "%s ", $i; print ""}')
-      log_path=$(echo "$command_part" | grep -oP '>>\s*\K[^ ]+' | tr -d '"')
+      log_path=$(extract_log_path "$command_part")
       job_lines[$job_index]="$line"
       job_logs[$job_index]="$log_path"
       job_meta[$job_index]="$current_block"
-      job_raw_lines[$job_index]="$current_block
-$line"
+      job_blocks[$job_index]="$current_block"
       current_block=""
       ((job_index++))
     fi
-  done < /tmp/cron_cleaned
+  done <"$cron_cleaned"
 
   echo
-  for i in "${!job_lines[@]}"; do
+  for i in $(printf '%s\n' "${!job_lines[@]}" | sort -n); do
     echo -e "${CYAN}Job #$i${RESET}"
     [[ -n "${job_meta[$i]}" ]] && echo -e "  ${YELLOW}${job_meta[$i]//\n/\n  }"
     schedule_part=$(echo "${job_lines[$i]}" | awk '{print $1, $2, $3, $4, $5}')
@@ -377,7 +539,7 @@ $line"
   old_line="${job_lines[$selected_index]}"
   schedule_part=$(echo "$old_line" | awk '{print $1, $2, $3, $4, $5}')
   command_part=$(echo "$old_line" | awk '{for (i=6; i<=NF; i++) printf "%s ", $i; print ""}' | sed 's/>>.*//')
-  log_path=$(echo "$old_line" | grep -oP '>>\s*\K[^ ]+' | tr -d '"')
+  log_path=$(extract_log_path "$old_line")
   job_name="${job_names[$selected_index]}"
   comment=$(echo "${job_meta[$selected_index]}" | grep -v '\[.*\]' | sed 's/^# *//')
 
@@ -444,22 +606,32 @@ $line"
   done
 
   new_block=""
-  [[ -n "$job_name" ]] && new_block="# [CronJob-ID]: $job_name"
-  [[ -n "$comment" ]] && new_block+=$'\n'# "$comment"
+  if [[ -n "$job_name" ]]; then
+    new_block+="# [CronJob-ID]: $job_name"
+  fi
+  if [[ -n "$comment" ]]; then
+    [[ -n "$new_block" ]] && new_block+=$'\n'
+    new_block+="# $comment"
+  fi
   new_command="$command_part"
   [[ -n "$log_path" ]] && new_command+=" >> \"$log_path\" 2>&1"
   new_line="$schedule_part $new_command"
 
-  grep -v -F "${job_raw_lines[$selected_index]}" /tmp/cron_cleaned > /tmp/cron_temp
-  {
-    cat /tmp/cron_temp
-    [[ -n "$new_block" ]] && echo "$new_block"
-    echo "$new_line"
-  } > /tmp/cron_updated
+  : >"$cron_updated"
+  for i in $(seq 1 $((job_index - 1))); do
+    if [[ "$i" == "$selected_index" ]]; then
+      [[ -n "$new_block" ]] && printf '%s\n' "$new_block" >>"$cron_updated"
+      printf '%s\n' "$new_line" >>"$cron_updated"
+    else
+      [[ -n "${job_blocks[$i]}" ]] && printf '%s\n' "${job_blocks[$i]}" >>"$cron_updated"
+      printf '%s\n' "${job_lines[$i]}" >>"$cron_updated"
+    fi
+  done
 
-  crontab -u "$REAL_USER" /tmp/cron_updated
+  write_crontab_for_user "$REAL_USER" "$cron_updated"
   echo
   echo -e "${GREEN}Cron job updated successfully.${RESET}"
+  log_action "updated cron job for $REAL_USER id='${job_name:-unnamed}' schedule='$schedule_part' command='$command_part' log='${log_path:-none}'"
   read -p "Press [Enter] to return..." pause
 }
 
@@ -471,11 +643,17 @@ delete_cronjob() {
   show_title
   echo -e "${CYAN}Delete an existing cron job${RESET}"
 
-  REAL_USER=$(logname)
-  crontab -u "$REAL_USER" -l 2>/dev/null > /tmp/cron_raw
-  grep -v '^$' /tmp/cron_raw > /tmp/cron_cleaned
+  local REAL_USER cron_raw cron_cleaned cron_updated
+  REAL_USER="$(resolve_cron_user)"
+  cron_raw="$(make_temp_file)"
+  cron_cleaned="$(make_temp_file)"
+  cron_updated="$(make_temp_file)"
+  trap 'rm -f "$cron_raw" "$cron_cleaned" "$cron_updated"' RETURN
 
-  if [[ ! -s /tmp/cron_cleaned ]]; then
+  read_crontab_for_user "$REAL_USER" "$cron_raw"
+  grep -v '^$' "$cron_raw" >"$cron_cleaned"
+
+  if [[ ! -s "$cron_cleaned" ]]; then
     echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
     echo
     read -p "Press [Enter] to return..." pause
@@ -495,7 +673,7 @@ delete_cronjob() {
     elif [[ "$line" =~ ^([0-9\*/,-]+\ +){4}[0-9\*/,-]+ ]]; then
       schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
       command_part=$(echo "$line" | cut -d' ' -f6-)
-      log_path=$(echo "$command_part" | grep -oP '>>\s*"\K[^"]+')
+      log_path=$(extract_log_path "$command_part")
 
       job_lines[$job_index]="$line"
       job_blocks[$job_index]="$current_block"
@@ -504,10 +682,10 @@ delete_cronjob() {
       current_block=""
       ((job_index++))
     fi
-  done < /tmp/cron_cleaned
+  done <"$cron_cleaned"
 
   echo
-  for index in "${!job_lines[@]}"; do
+  for index in $(printf '%s\n' "${!job_lines[@]}" | sort -n); do
     echo -e "${CYAN}Job #$index${RESET}"
     [[ -n "${job_blocks[$index]}" ]] && echo -e "  ${YELLOW}${job_blocks[$index]//\n/\n  }"
     echo -e "  ${YELLOW}Schedule:${RESET} $(echo "${job_lines[$index]}" | awk '{print $1, $2, $3, $4, $5}')"
@@ -539,24 +717,24 @@ delete_cronjob() {
   if [[ "$confirm1" =~ ^[Yy]$ ]]; then
     read -p "Please confirm again. Delete this cron job? (Y/N): " confirm2
     if [[ "$confirm2" =~ ^[Yy]$ ]]; then
-      first_line=$(echo "${job_blocks[$choice]}" | head -n 1)
-      last_line="${job_lines[$choice]}"
+      : >"$cron_updated"
+      for i in $(seq 1 $((job_index - 1))); do
+        [[ "$i" == "$choice" ]] && continue
+        [[ -n "${job_blocks[$i]}" ]] && printf '%s\n' "${job_blocks[$i]}" >>"$cron_updated"
+        printf '%s\n' "${job_lines[$i]}" >>"$cron_updated"
+      done
 
-      awk -v start="$first_line" -v end="$last_line" '
-        BEGIN { skip=0 }
-        $0 == start { skip=1; next }
-        skip && $0 == end { skip=0; next }
-        !skip { print }
-      ' /tmp/cron_cleaned > /tmp/cron_updated
-
-      crontab -u "$REAL_USER" /tmp/cron_updated
+      write_crontab_for_user "$REAL_USER" "$cron_updated"
       echo
       echo -e "${GREEN}Cron job deleted successfully.${RESET}"
+      log_action "deleted cron job for $REAL_USER id='${job_names[$choice]:-unnamed}' schedule='$(echo "${job_lines[$choice]}" | awk '{print $1, $2, $3, $4, $5}')'"
     else
       echo -e "${CYAN}Deletion cancelled.${RESET}"
+      log_action "deletion cancelled for $REAL_USER job='$choice'"
     fi
   else
     echo -e "${CYAN}Deletion cancelled.${RESET}"
+    log_action "deletion cancelled for $REAL_USER job='$choice'"
   fi
 
   read -p "Press [Enter] to return..." pause
