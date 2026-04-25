@@ -80,9 +80,9 @@ make_temp_file() {
 extract_log_path() {
   local text="$1"
 
-  if [[ "$text" =~ \>\>[[:space:]]*\"([^\"]+)\" ]]; then
+  if [[ "$text" =~ [[:space:]]\>\>[[:space:]]*\"([^\"]+)\"([[:space:]]+2\>\&1)?[[:space:]]*$ ]]; then
     printf '%s\n' "${BASH_REMATCH[1]}"
-  elif [[ "$text" =~ \>\>[[:space:]]*([^[:space:]]+) ]]; then
+  elif [[ "$text" =~ [[:space:]]\>\>[[:space:]]*([^[:space:]\"\']+)([[:space:]]+2\>\&1)?[[:space:]]*$ ]]; then
     printf '%s\n' "${BASH_REMATCH[1]}"
   fi
 }
@@ -97,6 +97,177 @@ job_exists_exactly() {
   local candidate="$2"
 
   grep -Fxq -- "$candidate" "$cron_file"
+}
+
+is_env_line() {
+  local line="$1"
+  [[ "$line" =~ ^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*= ]]
+}
+
+is_cron_macro() {
+  local value="$1"
+  case "$value" in
+    @reboot|@yearly|@annually|@monthly|@weekly|@daily|@midnight|@hourly) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_cron_job_line() {
+  local line="$1"
+
+  [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && return 1
+  is_env_line "$line" && return 1
+
+  if [[ "$line" =~ ^(@reboot|@yearly|@annually|@monthly|@weekly|@daily|@midnight|@hourly)[[:space:]]+.+ ]]; then
+    return 0
+  fi
+
+  [[ "$line" =~ ^([^[:space:]]+[[:space:]]+){5}.+ ]]
+}
+
+cron_schedule_part() {
+  local line="$1"
+
+  if [[ "$line" =~ ^(@reboot|@yearly|@annually|@monthly|@weekly|@daily|@midnight|@hourly)[[:space:]]+ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  else
+    awk '{print $1, $2, $3, $4, $5}' <<<"$line"
+  fi
+}
+
+cron_command_part() {
+  local line="$1"
+  local _minute _hour _day _month _weekday rest
+
+  if [[ "$line" =~ ^(@reboot|@yearly|@annually|@monthly|@weekly|@daily|@midnight|@hourly)[[:space:]]+(.+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[2]}"
+  else
+    read -r _minute _hour _day _month _weekday rest <<<"$line"
+    printf '%s\n' "$rest"
+  fi
+}
+
+validate_number_range() {
+  local value="$1"
+  local min="$2"
+  local max="$3"
+
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  (( value >= min && value <= max ))
+}
+
+validate_positive_number_range() {
+  local value="$1"
+  local min="$2"
+  local max="$3"
+
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  (( value >= min && value <= max ))
+}
+
+normalize_cron_name() {
+  local token="${1,,}"
+
+  case "$token" in
+    jan) printf '1' ;;
+    feb) printf '2' ;;
+    mar) printf '3' ;;
+    apr) printf '4' ;;
+    may) printf '5' ;;
+    jun) printf '6' ;;
+    jul) printf '7' ;;
+    aug) printf '8' ;;
+    sep) printf '9' ;;
+    oct) printf '10' ;;
+    nov) printf '11' ;;
+    dec) printf '12' ;;
+    sun) printf '0' ;;
+    mon) printf '1' ;;
+    tue) printf '2' ;;
+    wed) printf '3' ;;
+    thu) printf '4' ;;
+    fri) printf '5' ;;
+    sat) printf '6' ;;
+    *) printf '%s' "$token" ;;
+  esac
+}
+
+validate_cron_atom() {
+  local atom="$1"
+  local min="$2"
+  local max="$3"
+  local base step start end
+
+  if [[ "$atom" == */* ]]; then
+    base="${atom%/*}"
+    step="${atom##*/}"
+    validate_positive_number_range "$step" 1 "$max" || return 1
+  else
+    base="$atom"
+  fi
+
+  [[ "$base" == "*" ]] && return 0
+
+  if [[ "$base" == *-* ]]; then
+    start="$(normalize_cron_name "${base%-*}")"
+    end="$(normalize_cron_name "${base#*-}")"
+    validate_number_range "$start" "$min" "$max" || return 1
+    validate_number_range "$end" "$min" "$max" || return 1
+    (( start <= end )) || return 1
+    return 0
+  fi
+
+  base="$(normalize_cron_name "$base")"
+  validate_number_range "$base" "$min" "$max"
+}
+
+validate_cron_field() {
+  local field="$1"
+  local min="$2"
+  local max="$3"
+  local item
+
+  [[ -n "$field" ]] || return 1
+  [[ "$field" =~ ^[A-Za-z0-9*/,-]+$ ]] || return 1
+
+  IFS=',' read -ra items <<<"$field"
+  for item in "${items[@]}"; do
+    validate_cron_atom "$item" "$min" "$max" || return 1
+  done
+}
+
+validate_cron_schedule() {
+  local schedule="$1"
+  local minute hour day month weekday extra
+
+  read -r minute hour day month weekday extra <<<"$schedule"
+  [[ -z "$schedule" || -n "$extra" ]] && return 1
+
+  if is_cron_macro "$minute"; then
+    [[ -z "$hour" ]]
+    return
+  fi
+
+  [[ -n "$minute" && -n "$hour" && -n "$day" && -n "$month" && -n "$weekday" ]] || return 1
+  validate_cron_field "$minute" 0 59 || return 1
+  validate_cron_field "$hour" 0 23 || return 1
+  validate_cron_field "$day" 1 31 || return 1
+  validate_cron_field "$month" 1 12 || return 1
+  validate_cron_field "$weekday" 0 7 || return 1
+}
+
+strip_managed_log_redirect() {
+  local command_text="$1"
+  local log_path="$2"
+  local escaped_log
+
+  if [[ -z "$log_path" ]]; then
+    printf '%s\n' "$command_text"
+    return
+  fi
+
+  escaped_log="$(printf '%s' "$log_path" | sed 's/[][\/.^$*+?{}()|]/\\&/g')"
+  sed -E "s/[[:space:]]*>>[[:space:]]*\"?$escaped_log\"?[[:space:]]+2>&1[[:space:]]*$//" <<<"$command_text"
 }
 
 # --- SHOW TITLE ---
@@ -173,12 +344,22 @@ create_cronjob() {
         read -p "Minutes: " mins
         [[ "$mins" =~ ^[Bb]$ ]] && continue
         [[ "$mins" =~ ^[Cc]$ ]] && return
+        if ! validate_positive_number_range "$mins" 1 59; then
+          echo -e "${RED}Minutes must be a number between 1 and 59.${RESET}"
+          sleep 2
+          continue
+        fi
         schedule="*/$mins * * * *"; break ;;
       3)
         echo -e "${YELLOW}Enter how often in hours (e.g. 2):${RESET}"
         read -p "Hours: " hours
         [[ "$hours" =~ ^[Bb]$ ]] && continue
         [[ "$hours" =~ ^[Cc]$ ]] && return
+        if ! validate_positive_number_range "$hours" 1 23; then
+          echo -e "${RED}Hours must be a number between 1 and 23.${RESET}"
+          sleep 2
+          continue
+        fi
         schedule="0 */$hours * * *"; break ;;
       4)
         read -p "Hour (0-23): " hour
@@ -187,6 +368,11 @@ create_cronjob() {
         read -p "Minute (0-59): " min
         [[ "$min" =~ ^[Bb]$ ]] && continue
         [[ "$min" =~ ^[Cc]$ ]] && return
+        if ! validate_number_range "$hour" 0 23 || ! validate_number_range "$min" 0 59; then
+          echo -e "${RED}Hour must be 0-23 and minute must be 0-59.${RESET}"
+          sleep 2
+          continue
+        fi
         schedule="$min $hour * * *"; break ;;
       5)
         read -p "Hour (0-23): " hour
@@ -195,6 +381,11 @@ create_cronjob() {
         read -p "Minute (0-59): " min
         [[ "$min" =~ ^[Bb]$ ]] && continue
         [[ "$min" =~ ^[Cc]$ ]] && return
+        if ! validate_number_range "$hour" 0 23 || ! validate_number_range "$min" 0 59; then
+          echo -e "${RED}Hour must be 0-23 and minute must be 0-59.${RESET}"
+          sleep 2
+          continue
+        fi
         echo
         echo -e "${YELLOW}[Guide]${RESET} Days of the week:"
         echo -e "  ${CYAN}0${RESET}=Sun ${CYAN}1${RESET}=Mon ${CYAN}2${RESET}=Tue ${CYAN}3${RESET}=Wed ${CYAN}4${RESET}=Thu ${CYAN}5${RESET}=Fri ${CYAN}6${RESET}=Sat"
@@ -203,21 +394,32 @@ create_cronjob() {
         read -p "Enter weekdays: " days
         [[ "$days" =~ ^[Bb]$ ]] && continue
         [[ "$days" =~ ^[Cc]$ ]] && return
+        if ! validate_cron_field "$days" 0 7; then
+          echo -e "${RED}Weekdays must be valid cron values from 0-7, names, lists, ranges or steps.${RESET}"
+          sleep 2
+          continue
+        fi
         schedule="$min $hour * * $days"; break ;;
       6)
         echo
         echo -e "${YELLOW}[Advanced Mode]${RESET} Enter the full cron expression manually:"
-        echo -e "${CYAN}Format:${RESET} MIN HOUR DAY MONTH WEEKDAY"
+        echo -e "${CYAN}Format:${RESET} MIN HOUR DAY MONTH WEEKDAY, or a macro like @reboot/@daily"
         echo
         echo -e "${YELLOW}🧪 Examples:${RESET}"
         echo -e "  ${CYAN}0 6 * * 1${RESET}       → Every Monday at 6:00 AM"
         echo -e "  ${CYAN}30 23 * * *${RESET}     → Every day at 11:30 PM"
         echo -e "  ${CYAN}*/15 * * * *${RESET}    → Every 15 minutes"
+        echo -e "  ${CYAN}@reboot${RESET}         → When the system starts"
         echo
         echo -e "${MAGENTA}[B] Back | [C] Cancel${RESET}"
         read -p "Enter your custom cron expression: " schedule
         [[ "$schedule" =~ ^[Bb]$ ]] && continue
         [[ "$schedule" =~ ^[Cc]$ ]] && return
+        if ! validate_cron_schedule "$schedule"; then
+          echo -e "${RED}Invalid cron expression. Use 5 valid cron fields or a supported macro.${RESET}"
+          sleep 2
+          continue
+        fi
         break ;;
       [Bb]) return ;;
       [Cc]) return ;;
@@ -339,9 +541,11 @@ list_cronjobs() {
       job_names[$job_index]="${BASH_REMATCH[2]}"
     elif [[ "$line" =~ ^# ]]; then
       current_block+=$'\n'"$line"
-    elif [[ "$line" =~ ^([0-9\*/,-]+\ ){4,}[^\ ]+ ]]; then
-      schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
-      command_part=$(echo "$line" | cut -d' ' -f6-)
+    elif is_env_line "$line"; then
+      current_block=""
+    elif is_cron_job_line "$line"; then
+      schedule_part=$(cron_schedule_part "$line")
+      command_part=$(cron_command_part "$line")
       log_path=$(extract_log_path "$command_part")
       job_lines[$job_index]="$line"
       job_logs[$job_index]="$log_path"
@@ -353,8 +557,17 @@ list_cronjobs() {
       fi
       current_block=""
       ((job_index++))
+    else
+      current_block=""
     fi
   done < "$cron_cleaned"
+
+  if [[ "${#job_lines[@]}" -eq 0 ]]; then
+    echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
+    echo
+    read -p "Press [Enter] to return..." pause
+    return
+  fi
 
   echo
   local generated_count=0 manual_count=0
@@ -370,12 +583,12 @@ list_cronjobs() {
     [[ "${job_source[$index]}" != "generated" ]] && continue
     found_generated=1
     meta="${job_meta[$index]}"
-    [[ -n "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}\n  ${YELLOW}${meta//\\n/\\n  }"
+    [[ -n "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}\n  ${YELLOW}${meta//$'\n'/$'\n  '}"
     [[ -z "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}"
     echo -e "  ${MAGENTA}Type:${RESET} generated"
 
-    schedule_part=$(echo "${job_lines[$index]}" | awk '{print $1, $2, $3, $4, $5}')
-    command_part=$(echo "${job_lines[$index]}" | cut -d' ' -f6-)
+    schedule_part=$(cron_schedule_part "${job_lines[$index]}")
+    command_part=$(cron_command_part "${job_lines[$index]}")
 
     echo -e "  ${YELLOW}Schedule:${RESET} $schedule_part"
     echo -e "  ${MAGENTA}Command: ${RESET}$command_part"
@@ -395,12 +608,12 @@ list_cronjobs() {
     [[ "${job_source[$index]}" != "manual" ]] && continue
     found_manual=1
     meta="${job_meta[$index]}"
-    [[ -n "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}\n  ${YELLOW}${meta//\\n/\\n  }"
+    [[ -n "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}\n  ${YELLOW}${meta//$'\n'/$'\n  '}"
     [[ -z "$meta" ]] && echo -e "${CYAN}Job #$index${RESET}"
     echo -e "  ${MAGENTA}Type:${RESET} manual"
 
-    schedule_part=$(echo "${job_lines[$index]}" | awk '{print $1, $2, $3, $4, $5}')
-    command_part=$(echo "${job_lines[$index]}" | cut -d' ' -f6-)
+    schedule_part=$(cron_schedule_part "${job_lines[$index]}")
+    command_part=$(cron_command_part "${job_lines[$index]}")
 
     echo -e "  ${YELLOW}Schedule:${RESET} $schedule_part"
     echo -e "  ${MAGENTA}Command: ${RESET}$command_part"
@@ -478,35 +691,56 @@ edit_cronjob() {
     return
   fi
 
-  declare -A job_lines job_logs job_meta job_names job_blocks
+  declare -A job_lines job_logs job_meta job_names job_blocks job_start_lines job_line_numbers
   current_block=""
+  current_block_start=0
   job_index=1
+  line_no=0
 
-  while IFS= read -r line; do
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    ((line_no++))
     if [[ "$line" =~ ^#\ \[(XEMI-ID|CronJob-ID)\]:\ (.+) ]]; then
+      [[ -z "$current_block" ]] && current_block_start="$line_no"
       current_block="$line"
       job_names[$job_index]="${BASH_REMATCH[2]}"
     elif [[ "$line" =~ ^# ]]; then
+      [[ -z "$current_block" ]] && current_block_start="$line_no"
       current_block+=$'\n'$line
-    elif [[ "$line" =~ ^([0-9\*/,-]+\ +){4}[0-9\*/,-]+ ]]; then
-      schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
-      command_part=$(echo "$line" | awk '{for (i=6; i<=NF; i++) printf "%s ", $i; print ""}')
+    elif is_env_line "$line" || [[ -z "$line" ]]; then
+      current_block=""
+      current_block_start=0
+    elif is_cron_job_line "$line"; then
+      schedule_part=$(cron_schedule_part "$line")
+      command_part=$(cron_command_part "$line")
       log_path=$(extract_log_path "$command_part")
       job_lines[$job_index]="$line"
       job_logs[$job_index]="$log_path"
       job_meta[$job_index]="$current_block"
       job_blocks[$job_index]="$current_block"
+      job_start_lines[$job_index]="${current_block_start:-$line_no}"
+      [[ "${job_start_lines[$job_index]}" -eq 0 ]] && job_start_lines[$job_index]="$line_no"
+      job_line_numbers[$job_index]="$line_no"
       current_block=""
+      current_block_start=0
       ((job_index++))
+    else
+      current_block=""
+      current_block_start=0
     fi
-  done <"$cron_cleaned"
+  done <"$cron_raw"
+
+  if [[ "${#job_lines[@]}" -eq 0 ]]; then
+    echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
+    read -p "Press [Enter] to return..." pause
+    return
+  fi
 
   echo
   for i in $(printf '%s\n' "${!job_lines[@]}" | sort -n); do
     echo -e "${CYAN}Job #$i${RESET}"
-    [[ -n "${job_meta[$i]}" ]] && echo -e "  ${YELLOW}${job_meta[$i]//\n/\n  }"
-    schedule_part=$(echo "${job_lines[$i]}" | awk '{print $1, $2, $3, $4, $5}')
-    command_part=$(echo "${job_lines[$i]}" | awk '{for (j=6; j<=NF; j++) printf "%s ", $j; print ""}')
+    [[ -n "${job_meta[$i]}" ]] && echo -e "  ${YELLOW}${job_meta[$i]//$'\n'/$'\n  '}"
+    schedule_part=$(cron_schedule_part "${job_lines[$i]}")
+    command_part=$(cron_command_part "${job_lines[$i]}")
     echo -e "  ${YELLOW}Schedule:${RESET} $schedule_part"
     echo -e "  ${MAGENTA}Command:${RESET} $command_part"
     [[ -n "${job_logs[$i]}" ]] && echo -e "  ${GREEN}Log file:${RESET} ${job_logs[$i]}"
@@ -537,9 +771,10 @@ edit_cronjob() {
   fi
 
   old_line="${job_lines[$selected_index]}"
-  schedule_part=$(echo "$old_line" | awk '{print $1, $2, $3, $4, $5}')
-  command_part=$(echo "$old_line" | awk '{for (i=6; i<=NF; i++) printf "%s ", $i; print ""}' | sed 's/>>.*//')
+  schedule_part=$(cron_schedule_part "$old_line")
+  command_part=$(cron_command_part "$old_line")
   log_path=$(extract_log_path "$old_line")
+  command_part=$(strip_managed_log_redirect "$command_part" "$log_path")
   job_name="${job_names[$selected_index]}"
   comment=$(echo "${job_meta[$selected_index]}" | grep -v '\[.*\]' | sed 's/^# *//')
 
@@ -578,18 +813,38 @@ edit_cronjob() {
           read -p "Option: " sched_opt
           case "$sched_opt" in
             1) schedule_part="* * * * *"; break ;;
-            2) read -p "Minutes: " mins; schedule_part="*/$mins * * * *"; break ;;
-            3) read -p "Hours: " hrs; schedule_part="0 */$hrs * * *"; break ;;
+            2)
+              read -p "Minutes: " mins
+              if validate_positive_number_range "$mins" 1 59; then
+                schedule_part="*/$mins * * * *"; break
+              fi
+              echo -e "${RED}Minutes must be a number between 1 and 59.${RESET}" ;;
+            3)
+              read -p "Hours: " hrs
+              if validate_positive_number_range "$hrs" 1 23; then
+                schedule_part="0 */$hrs * * *"; break
+              fi
+              echo -e "${RED}Hours must be a number between 1 and 23.${RESET}" ;;
             4)
               read -p "Hour (0-23): " h; read -p "Minute (0-59): " m
-              schedule_part="$m $h * * *"; break ;;
+              if validate_number_range "$h" 0 23 && validate_number_range "$m" 0 59; then
+                schedule_part="$m $h * * *"; break
+              fi
+              echo -e "${RED}Hour must be 0-23 and minute must be 0-59.${RESET}" ;;
             5)
               read -p "Hour (0-23): " h; read -p "Minute (0-59): " m
               echo "  0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat"
               read -p "Weekdays (comma-separated): " d
-              schedule_part="$m $h * * $d"; break ;;
+              if validate_number_range "$h" 0 23 && validate_number_range "$m" 0 59 && validate_cron_field "$d" 0 7; then
+                schedule_part="$m $h * * $d"; break
+              fi
+              echo -e "${RED}Use hour 0-23, minute 0-59, and valid weekday cron values.${RESET}" ;;
             6)
-              read -p "Manual cron expression: " schedule_part; break ;;
+              read -p "Manual cron expression: " schedule_part
+              if validate_cron_schedule "$schedule_part"; then
+                break
+              fi
+              echo -e "${RED}Invalid cron expression. Use 5 valid cron fields or a supported macro.${RESET}" ;;
             [Bb]) break ;;
             [Cc]) return ;;
             *) echo -e "${RED}Invalid option.${RESET}" ;;
@@ -610,23 +865,31 @@ edit_cronjob() {
     new_block+="# [CronJob-ID]: $job_name"
   fi
   if [[ -n "$comment" ]]; then
-    [[ -n "$new_block" ]] && new_block+=$'\n'
-    new_block+="# $comment"
+    while IFS= read -r comment_line || [[ -n "$comment_line" ]]; do
+      [[ -n "$new_block" ]] && new_block+=$'\n'
+      new_block+="# $comment_line"
+    done <<<"$comment"
   fi
   new_command="$command_part"
   [[ -n "$log_path" ]] && new_command+=" >> \"$log_path\" 2>&1"
   new_line="$schedule_part $new_command"
 
   : >"$cron_updated"
-  for i in $(seq 1 $((job_index - 1))); do
-    if [[ "$i" == "$selected_index" ]]; then
+  line_no=0
+  skip_until="${job_line_numbers[$selected_index]}"
+  insert_at="${job_start_lines[$selected_index]}"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    ((line_no++))
+    if (( line_no == insert_at )); then
       [[ -n "$new_block" ]] && printf '%s\n' "$new_block" >>"$cron_updated"
       printf '%s\n' "$new_line" >>"$cron_updated"
-    else
-      [[ -n "${job_blocks[$i]}" ]] && printf '%s\n' "${job_blocks[$i]}" >>"$cron_updated"
-      printf '%s\n' "${job_lines[$i]}" >>"$cron_updated"
     fi
-  done
+
+    if (( line_no >= insert_at && line_no <= skip_until )); then
+      continue
+    fi
+    printf '%s\n' "$line" >>"$cron_updated"
+  done <"$cron_raw"
 
   write_crontab_for_user "$REAL_USER" "$cron_updated"
   echo
@@ -660,36 +923,58 @@ delete_cronjob() {
     return
   fi
 
-  declare -A job_lines job_blocks job_logs job_meta job_names
+  declare -A job_lines job_blocks job_logs job_meta job_names job_start_lines job_line_numbers
   current_block=""
+  current_block_start=0
   job_index=1
+  line_no=0
 
-  while IFS= read -r line; do
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    ((line_no++))
     if [[ "$line" =~ ^#\ \[(XEMI-ID|CronJob-ID)\]:\ (.+) ]]; then
+      [[ -z "$current_block" ]] && current_block_start="$line_no"
       current_block="$line"
       job_names[$job_index]="${BASH_REMATCH[2]}"
     elif [[ "$line" =~ ^# ]]; then
+      [[ -z "$current_block" ]] && current_block_start="$line_no"
       current_block+=$'\n'$line
-    elif [[ "$line" =~ ^([0-9\*/,-]+\ +){4}[0-9\*/,-]+ ]]; then
-      schedule_part=$(echo "$line" | awk '{print $1, $2, $3, $4, $5}')
-      command_part=$(echo "$line" | cut -d' ' -f6-)
+    elif is_env_line "$line" || [[ -z "$line" ]]; then
+      current_block=""
+      current_block_start=0
+    elif is_cron_job_line "$line"; then
+      schedule_part=$(cron_schedule_part "$line")
+      command_part=$(cron_command_part "$line")
       log_path=$(extract_log_path "$command_part")
 
       job_lines[$job_index]="$line"
       job_blocks[$job_index]="$current_block"
       job_logs[$job_index]="$log_path"
       job_meta[$job_index]="$current_block"
+      job_start_lines[$job_index]="${current_block_start:-$line_no}"
+      [[ "${job_start_lines[$job_index]}" -eq 0 ]] && job_start_lines[$job_index]="$line_no"
+      job_line_numbers[$job_index]="$line_no"
       current_block=""
+      current_block_start=0
       ((job_index++))
+    else
+      current_block=""
+      current_block_start=0
     fi
-  done <"$cron_cleaned"
+  done <"$cron_raw"
+
+  if [[ "${#job_lines[@]}" -eq 0 ]]; then
+    echo -e "${YELLOW}No cron jobs found for user $REAL_USER.${RESET}"
+    echo
+    read -p "Press [Enter] to return..." pause
+    return
+  fi
 
   echo
   for index in $(printf '%s\n' "${!job_lines[@]}" | sort -n); do
     echo -e "${CYAN}Job #$index${RESET}"
-    [[ -n "${job_blocks[$index]}" ]] && echo -e "  ${YELLOW}${job_blocks[$index]//\n/\n  }"
-    echo -e "  ${YELLOW}Schedule:${RESET} $(echo "${job_lines[$index]}" | awk '{print $1, $2, $3, $4, $5}')"
-    echo -e "  ${MAGENTA}Command: ${RESET}$(echo "${job_lines[$index]}" | cut -d' ' -f6-)"
+    [[ -n "${job_blocks[$index]}" ]] && echo -e "  ${YELLOW}${job_blocks[$index]//$'\n'/$'\n  '}"
+    echo -e "  ${YELLOW}Schedule:${RESET} $(cron_schedule_part "${job_lines[$index]}")"
+    echo -e "  ${MAGENTA}Command: ${RESET}$(cron_command_part "${job_lines[$index]}")"
     if [[ -n "${job_logs[$index]}" ]]; then
       echo -e "  ${GREEN}Log file:${RESET} ${job_logs[$index]}"
     else
@@ -700,9 +985,22 @@ delete_cronjob() {
 
   echo
   echo -e "${MAGENTA}[C] Cancel${RESET}"
-  read -p "Enter the job number to delete: " choice
+  read -p "Enter the job number or CronJob-ID to delete: " choice
   [[ "$choice" =~ ^[Cc]$ ]] && return
-  if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ -z "${job_lines[$choice]}" ]]; then
+
+  selected_index=""
+  if [[ "$choice" =~ ^[0-9]+$ ]]; then
+    selected_index="$choice"
+  else
+    for i in "${!job_names[@]}"; do
+      if [[ "${job_names[$i],,}" == "${choice,,}" ]]; then
+        selected_index="$i"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$selected_index" ]] || [[ -z "${job_lines[$selected_index]}" ]]; then
     echo -e "${RED}Invalid selection.${RESET}"
     read -p "Press [Enter] to return..." pause
     return
@@ -710,31 +1008,34 @@ delete_cronjob() {
 
   echo
   echo -e "${YELLOW}You selected to delete:${RESET}"
-  [[ -n "${job_blocks[$choice]}" ]] && echo -e "${job_blocks[$choice]}"
-  echo -e "${CYAN}${job_lines[$choice]}${RESET}"
+  [[ -n "${job_blocks[$selected_index]}" ]] && echo -e "${job_blocks[$selected_index]}"
+  echo -e "${CYAN}${job_lines[$selected_index]}${RESET}"
   echo
   read -p "Are you sure you want to delete this cron job? (Y/N): " confirm1
   if [[ "$confirm1" =~ ^[Yy]$ ]]; then
     read -p "Please confirm again. Delete this cron job? (Y/N): " confirm2
     if [[ "$confirm2" =~ ^[Yy]$ ]]; then
       : >"$cron_updated"
-      for i in $(seq 1 $((job_index - 1))); do
-        [[ "$i" == "$choice" ]] && continue
-        [[ -n "${job_blocks[$i]}" ]] && printf '%s\n' "${job_blocks[$i]}" >>"$cron_updated"
-        printf '%s\n' "${job_lines[$i]}" >>"$cron_updated"
-      done
+      line_no=0
+      skip_start="${job_start_lines[$selected_index]}"
+      skip_until="${job_line_numbers[$selected_index]}"
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        ((line_no++))
+        (( line_no >= skip_start && line_no <= skip_until )) && continue
+        printf '%s\n' "$line" >>"$cron_updated"
+      done <"$cron_raw"
 
       write_crontab_for_user "$REAL_USER" "$cron_updated"
       echo
       echo -e "${GREEN}Cron job deleted successfully.${RESET}"
-      log_action "deleted cron job for $REAL_USER id='${job_names[$choice]:-unnamed}' schedule='$(echo "${job_lines[$choice]}" | awk '{print $1, $2, $3, $4, $5}')'"
+      log_action "deleted cron job for $REAL_USER id='${job_names[$selected_index]:-unnamed}' schedule='$(cron_schedule_part "${job_lines[$selected_index]}")'"
     else
       echo -e "${CYAN}Deletion cancelled.${RESET}"
-      log_action "deletion cancelled for $REAL_USER job='$choice'"
+      log_action "deletion cancelled for $REAL_USER job='$selected_index'"
     fi
   else
     echo -e "${CYAN}Deletion cancelled.${RESET}"
-    log_action "deletion cancelled for $REAL_USER job='$choice'"
+    log_action "deletion cancelled for $REAL_USER job='$selected_index'"
   fi
 
   read -p "Press [Enter] to return..." pause
